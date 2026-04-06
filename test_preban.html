@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>测试 Preban 过滤</title>
+</head>
+<body>
+    <h1>测试 Preban 阶段英雄过滤</h1>
+    
+    <div>
+        <h2>当前状态</h2>
+        <p>phase: <span id="phase">preban</span></p>
+        <p>myPreban: <span id="myPreban">[]</span></p>
+        <p>enemyPreban: <span id="enemyPreban">[]</span></p>
+    </div>
+    
+    <div>
+        <h2>英雄列表（应该显示所有 348 个，包括已 Ban 的）</h2>
+        <div id="heroGrid" style="display: grid; grid-template-columns: repeat(10, 50px); gap: 5px;"></div>
+    </div>
+    
+    <div>
+        <h2>操作</h2>
+        <button onclick="addMyBan('c1153')">我方 Ban c1153</button>
+        <button onclick="addMyBan('c1133')">我方 Ban c1133</button>
+        <button onclick="addEnemyBan('c1117')">敌方 Ban c1117</button>
+        <button onclick="addEnemyBan('c6005')">敌方 Ban c6005</button>
+        <button onclick="addMyBan('c1153')">再 Ban 一次 c1153（测试重复）</button>
+    </div>
+    
+    <div>
+        <h2>Console</h2>
+        <div id="console" style="background: #f0f0f0; padding: 10px; font-family: monospace; height: 200px; overflow: auto;"></div>
+    </div>
+    
+    <script>
+        const state = {
+            phase: 'preban',
+            myPreban: [],
+            enemyPreban: []
+        };
+        
+        function log(msg) {
+            const consoleDiv = document.getElementById('console');
+            consoleDiv.innerHTML += `<div>${new Date().toLocaleTimeString()} - ${msg}</div>`;
+            consoleDiv.scrollTop = consoleDiv.scrollHeight;
+        }
+        
+        function renderGrid() {
+            const banned = new Set([...state.myPreban, ...state.enemyPreban]);
+            
+            log(`phase: ${state.phase}, myPreban: ${JSON.stringify(state.myPreban)}, enemyPreban: ${JSON.stringify(state.enemyPreban)}`);
+            log(`banned: ${[...banned].join(', ')}`);
+            
+            // 模拟 10 个英雄
+            const heroes = ['c1153', 'c1133', 'c1117', 'c6005', 'c2076', 'c1168', 'c5072', 'c2066', 'c2102', 'c2069'];
+            
+            let displayHeroes = heroes;
+            
+            // 关键逻辑：只在 Pick 阶段过滤，Preban 阶段不过滤
+            if (state.phase.startsWith('pick')) {
+                displayHeroes = heroes.filter(h => !banned.has(h));
+                log('Pick 阶段：过滤已 Ban 的英雄');
+            } else {
+                log('Preban 阶段：不过滤英雄（可以重复 Ban）');
+            }
+            
+            const grid = document.getElementById('heroGrid');
+            grid.innerHTML = displayHeroes.map(h => {
+                const isBanned = banned.has(h);
+                return `<div style="width: 50px; height: 50px; border: 2px solid ${isBanned ? 'red' : 'green'}; display: flex; align-items: center; justify-content: center; font-size: 10px; ${isBanned ? 'opacity: 0.5' : ''}">
+                    ${h}
+                    ${isBanned ? '<br/>（已 Ban）' : ''}
+                </div>`;
+            }).join('');
+            
+            document.getElementById('phase').textContent = state.phase;
+            document.getElementById('myPreban').textContent = JSON.stringify(state.myPreban);
+            document.getElementById('enemyPreban').textContent = JSON.stringify(state.enemyPreban);
+        }
+        
+        function addMyBan(hero) {
+            state.myPreban.push(hero);
+            log(`我方 Ban: ${hero}`);
+            renderGrid();
+        }
+        
+        function addEnemyBan(hero) {
+            state.enemyPreban.push(hero);
+            log(`敌方 Ban: ${hero}`);
+            renderGrid();
+        }
+        
+        // 初始渲染
+        log('=== 初始渲染 ===');
+        renderGrid();
+    </script>
+</body>
+</html>
