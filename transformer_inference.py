@@ -34,17 +34,25 @@ class DraftRecommender:
         # 加载模型
         if os.path.exists(model_path):
             checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+            config = checkpoint['config']
+            
+            # 从 checkpoint 读取 dim_feedforward
+            # 旧模型没有这个字段，但权重是用 1024 训练的（2026-05-12 之后的训练）
+            # 新模型有这个字段，值为 d_model * 4 = 1024
+            dim_feedforward = config.get('dim_feedforward', 1024)  # 默认 1024 兼容近期训练
+            
             self.model = DraftTransformer(
-                num_heroes=checkpoint['config']['num_heroes'],
-                d_model=checkpoint['config']['d_model'],
-                nhead=checkpoint['config']['nhead'],
-                num_layers=checkpoint['config']['num_layers'],
-                dropout=checkpoint['config']['dropout']
+                num_heroes=config['num_heroes'],
+                d_model=config['d_model'],
+                nhead=config['nhead'],
+                num_layers=config['num_layers'],
+                dropout=config['dropout'],
+                dim_feedforward=dim_feedforward
             )
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.to(self.device)
             self.model.eval()
-            print(f"OK 模型加载成功 (验证准确率：{checkpoint.get('val_acc', 0):.4f})")
+            print(f"OK 模型加载成功 (验证准确率：{checkpoint.get('val_acc', 0):.4f}, dim_feedforward={dim_feedforward})")
         else:
             print(f"W 找不到模型文件：{model_path}")
     
@@ -258,6 +266,72 @@ class DraftRecommender:
             })
         
         return result
+
+    def recommend_finalban(self, my_picks, enemy_picks, banned, my_first=True, ban_from_picks=None, top_k=5):
+        """
+        Finalban 阶段推荐：从对方 5 英雄中选 1 个禁用
+
+        Finalban 规则：
+        - 后手方先 Ban：从先手方 5 英雄中选 1 个禁用
+        - 先手方后 Ban：从后手方 5 英雄中选 1 个禁用
+
+        Args:
+            my_picks: List[str] - 我方 5 英雄
+            enemy_picks: List[str] - 敌方 5 英雄
+            banned: List[str] - Preban 列表
+            my_first: bool - 我方是否先手
+            ban_from_picks: List[str] - 从哪方英雄中选（当前对方的英雄）
+            top_k: int - 返回前 K 个推荐
+
+        Returns:
+            List[Dict] - 推荐列表
+        """
+        if self.model is None or (not my_picks and not enemy_picks):
+            return []
+
+        # 1. 构建已选序列（4 Preban + 10 Pick）
+        hero_seq, side_seq = [], []
+        for hero in banned:
+            if hero in self.hero_to_idx:
+                hero_seq.append(self.hero_to_idx[hero])
+                side_seq.append(3)
+
+        if my_first:
+            first_picks, second_picks = my_picks, enemy_picks
+            first_id, second_id = 1, 2
+        else:
+            first_picks, second_picks = enemy_picks, my_picks
+            first_id, second_id = 2, 1
+
+        for picks, count, side_id in [
+            (first_picks,  1, first_id),
+            (second_picks, 2, second_id),
+            (first_picks,  2, first_id),
+            (second_picks, 2, second_id),
+            (first_picks,  2, first_id),
+            (second_picks, 1, second_id),
+        ]:
+            for hero in picks[:count]:
+                if hero in self.hero_to_idx:
+                    hero_seq.append(self.hero_to_idx[hero])
+                    side_seq.append(side_id)
+
+        # 2. 生成 available_mask：只开放 ban_from_picks 中的英雄
+        import torch as _torch
+        available_mask = _torch.zeros(self.num_heroes, dtype=_torch.float)
+
+        if ban_from_picks is None:
+            # 默认：从我方先手时的敌方英雄中选
+            ban_from_picks = enemy_picks
+
+        for hero in ban_from_picks:
+            if hero in self.hero_to_idx:
+                available_mask[self.hero_to_idx[hero]] = 1.0
+
+        # 3. 预测（phase=6 表示 Finalban）
+        recs = self.model.predict_next_pick(hero_seq, side_seq, 6, available_mask, top_k)
+        return [{'hero_code': self.idx_to_hero.get(r['hero_idx'], 'unknown'),
+                 'probability': r['probability']} for r in recs]
 
     def predict_win_rate(self, my_picks, enemy_picks, banned):
         """

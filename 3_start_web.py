@@ -776,12 +776,8 @@ HTML = '''<!DOCTYPE html>
             // state.heroes 已经包含了 image_url（本地路径或网络路径）
             const hero = state.heroes.find(x => x.code === code);
             if (hero && hero.image_url) {
-                // 如果是本地路径（/hero_images/开头），直接使用
-                if (hero.image_url.startsWith('/hero_images/')) {
-                    return hero.image_url;
-                }
-                // 如果是网络路径，添加缓存 busting 参数
-                return hero.image_url + '?v=1';
+                // 本地路径直接使用（浏览器会自动缓存）
+                return hero.image_url;
             }
             // 备用：官网 URL
             return 'https://static-pubcomm.onstove.com/event/live/epic7/guide/images/hero/' + code + '_s.png';
