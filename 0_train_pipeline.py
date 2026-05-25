@@ -38,11 +38,19 @@ def run_step(label, script):
     print(f"  {label}  ({script})")
     print(f"{'='*60}")
     t0 = time.time()
-    result = subprocess.run([sys.executable, path], cwd=HERE)
+    proc = subprocess.Popen([sys.executable, path], cwd=HERE)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        print(f"\n⏹ 收到停止信号，正在终止 {script}...")
+        proc.terminate()
+        proc.wait()
+        print("已停止。")
+        sys.exit(0)
     elapsed = time.time() - t0
-    if result.returncode != 0:
-        print(f"\n✗ {label} 失败（exit {result.returncode}），流水线中断。")
-        sys.exit(result.returncode)
+    if proc.returncode != 0:
+        print(f"\n✗ {label} 失败（exit {proc.returncode}），流水线中断。")
+        sys.exit(proc.returncode)
     print(f"\n✓ {label} 完成  耗时 {elapsed:.1f}s")
 
 

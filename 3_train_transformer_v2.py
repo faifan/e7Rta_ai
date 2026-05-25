@@ -1,11 +1,5 @@
 """
-第七史诗选秀辅助 - 4. 训练 Transformer 模型（修复数据问题版）
-
-修复内容：
-1. iswin 字段判断：增加对 iswin=2 的处理（可能是胜利标记）
-2. 增加英雄属性 Embedding（职业 + 属性）
-3. 增加模型容量
-4. 增加 Label Smoothing 防止过拟合
+第七史诗选秀辅助 - 4. 训练 Transformer 模型
 """
 
 import os
@@ -24,51 +18,32 @@ sys.stdout.reconfigure(encoding='utf-8')
 from model import DraftTransformer
 
 # ==================== 配置 ====================
-DATA_FILE = 'output/all_clean_v2.json'  # ⭐ 使用二次清洗后的数据
+DATA_FILE = 'output/all_clean_v2.json'
 OUTPUT_MODEL = 'draft_transformer.pth'
-HERO_LIST_FILE = 'hero_list_146.json'  # ⭐ 新的英雄列表
+HERO_LIST_FILE = 'hero_list_146.json'
 CACHE_FILE = 'output/processed_data_cache_146.pth'
-HERO_INFO_FILE = 'e7.json'
 
-# ⭐ 防过拟合参数（2026-05-12 优化版）
 BATCH_SIZE = 128
-EPOCHS = 50  # ⭐ 增加训练轮数
-LEARNING_RATE = 0.0005  # ⭐ 降低学习率，防止震荡
+EPOCHS = 50
+LEARNING_RATE = 0.0005
 
-D_MODEL = 128  # ⭐ 降低模型容量，防止过拟合
-NHEAD = 4
-NUM_LAYERS = 2
-DROPOUT = 0.2  # ⭐ 增加 Dropout
+D_MODEL = 192
+NHEAD = 6
+NUM_LAYERS = 3
+DROPOUT = 0.2
 MAX_SEQ_LEN = 20
 
-# ⭐ 正则化
 WEIGHT_DECAY = 0.01
 GRADIENT_CLIP = 1.0
 LABEL_SMOOTHING = 0.1
+FINALBAN_WEIGHT = 3.0  # finalban 样本较少但重要，上采样权重
 
 GRADIENT_ACCUM_STEPS = 1
-EARLY_STOP_PATIENCE = 10  # ⭐ 增加早停耐心
+EARLY_STOP_PATIENCE = 10
 WARMUP_RATIO = 0.2
 
 
 # ==================== 数据解析 ====================
-def load_hero_info():
-    """加载英雄属性信息"""
-    with open(HERO_INFO_FILE, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    
-    hero_info = {}
-    for hero in data:
-        code = hero.get('code')
-        if code:
-            hero_info[code] = {
-                'job': hero.get('job_cd', 'unknown'),
-                'attr': hero.get('attribute_cd', 'unknown'),
-                'grade': hero.get('grade', '5')
-            }
-    return hero_info
-
-
 def parse_deck(deck_data):
     if not deck_data:
         return [], []
@@ -123,10 +98,9 @@ class EarlyStopping:
 
 # ==================== 数据集（修复版） ====================
 class DraftDataset(Dataset):
-    def __init__(self, battles, hero_to_idx, hero_info=None):
+    def __init__(self, battles, hero_to_idx):
         self.samples = []
         self.hero_to_idx = hero_to_idx
-        self.hero_info = hero_info or {}
         self.num_heroes = len(hero_to_idx)
 
         print("处理战斗数据...")
@@ -144,10 +118,9 @@ class DraftDataset(Dataset):
     def _process_battle(self, battle):
         my_heroes_data, my_preban = parse_deck(battle.get('my_deck', {}))
         enemy_heroes_data, enemy_preban = parse_deck(battle.get('enemy_deck', {}))
-        
-        # ⭐ 修复：iswin 可能是 1 或 2 都表示胜利
+
         iswin_raw = battle.get('iswin', 0)
-        is_win = iswin_raw in [1, 2]  # 1 或 2 都算赢
+        is_win = iswin_raw == 1  # 只有1才是赢，2是输
 
         my_heroes = [h['code'] for h in my_heroes_data if h['code'] in self.hero_to_idx]
         enemy_heroes = [h['code'] for h in enemy_heroes_data if h['code'] in self.hero_to_idx]
@@ -159,12 +132,18 @@ class DraftDataset(Dataset):
             return
 
         my_first_pick = any(h.get('first_pick', 0) == 1 for h in my_heroes_data)
+        my_finalban = next((h['code'] for h in my_heroes_data if h.get('ban') == 1), None)
+        enemy_finalban = next((h['code'] for h in enemy_heroes_data if h.get('ban') == 1), None)
 
-        if my_first_pick:
-            first_side = 'my'
-        else:
-            first_side = 'enemy'
+        # 原始视角
+        self._generate_samples(my_heroes, enemy_heroes, my_preban, enemy_preban,
+                               is_win, my_first_pick, my_finalban, enemy_finalban)
+        # 互换视角数据增强（双倍数据）
+        self._generate_samples(enemy_heroes, my_heroes, enemy_preban, my_preban,
+                               not is_win, not my_first_pick, enemy_finalban, my_finalban)
 
+    def _generate_samples(self, my_heroes, enemy_heroes, my_preban, enemy_preban,
+                          is_win, my_first_pick, my_finalban, enemy_finalban):
         hero_seq = []
         side_seq = []
 
@@ -179,7 +158,8 @@ class DraftDataset(Dataset):
                     'target': self.hero_to_idx[my_preban[i]],
                     'phase': 0,
                     'win': 1 if is_win else 0,
-                    'side': 1
+                    'side': 1,
+                    'weight': 1.0
                 })
             my_ban_seq.append(self.hero_to_idx[my_preban[i]])
             my_ban_side.append(3)
@@ -194,7 +174,8 @@ class DraftDataset(Dataset):
                     'target': self.hero_to_idx[enemy_preban[i]],
                     'phase': 0,
                     'win': 0 if is_win else 1,
-                    'side': 2
+                    'side': 2,
+                    'weight': 1.0
                 })
             enemy_ban_seq.append(self.hero_to_idx[enemy_preban[i]])
             enemy_ban_side.append(3)
@@ -202,24 +183,16 @@ class DraftDataset(Dataset):
         for h in my_preban + enemy_preban:
             hero_seq.append(self.hero_to_idx[h])
             side_seq.append(3)
-            
-        if first_side == 'my':
+
+        if my_first_pick:
             picks_order = [
-                ('my', 1),
-                ('enemy', 2),
-                ('my', 2),
-                ('enemy', 2),
-                ('my', 2),
-                ('enemy', 1),
+                ('my', 1), ('enemy', 2), ('my', 2),
+                ('enemy', 2), ('my', 2), ('enemy', 1),
             ]
         else:
             picks_order = [
-                ('enemy', 1),
-                ('my', 2),
-                ('enemy', 2),
-                ('my', 2),
-                ('enemy', 2),
-                ('my', 1),
+                ('enemy', 1), ('my', 2), ('enemy', 2),
+                ('my', 2), ('enemy', 2), ('my', 1),
             ]
 
         my_idx = enemy_idx = current_phase = 0
@@ -234,7 +207,8 @@ class DraftDataset(Dataset):
                             'target': self.hero_to_idx[my_heroes[my_idx]],
                             'phase': current_phase,
                             'win': 1 if is_win else 0,
-                            'side': 1
+                            'side': 1,
+                            'weight': 1.0
                         })
                     hero_seq.append(self.hero_to_idx[my_heroes[my_idx]])
                     side_seq.append(1)
@@ -248,7 +222,8 @@ class DraftDataset(Dataset):
                             'target': self.hero_to_idx[enemy_heroes[enemy_idx]],
                             'phase': current_phase,
                             'win': 0 if is_win else 1,
-                            'side': 2
+                            'side': 2,
+                            'weight': 1.0
                         })
                     hero_seq.append(self.hero_to_idx[enemy_heroes[enemy_idx]])
                     side_seq.append(2)
@@ -257,30 +232,17 @@ class DraftDataset(Dataset):
             if current_phase < 5:
                 current_phase += 1
 
-        # ==================== Finalban 阶段 ====================
-        # 找出被 Finalban 的英雄（ban=1 表示被禁用）
-        my_finalban = None
-        enemy_finalban = None
-
-        for h in my_heroes_data:
-            if h.get('ban') == 1:
-                my_finalban = h['code']
-                break
-
-        for h in enemy_heroes_data:
-            if h.get('ban') == 1:
-                enemy_finalban = h['code']
-                break
-
+        # Finalban 阶段
         # 我方 Finalban：从敌方 5 英雄中选 1 个禁用
         if enemy_finalban and enemy_finalban in self.hero_to_idx:
             self.samples.append({
                 'hero_seq': hero_seq.copy(),
                 'side_seq': side_seq.copy(),
                 'target': self.hero_to_idx[enemy_finalban],
-                'phase': 6,  # Finalban 阶段
+                'phase': 6,
                 'win': 1 if is_win else 0,
-                'side': 1
+                'side': 1,
+                'weight': FINALBAN_WEIGHT
             })
 
         # 敌方 Finalban：从我方 5 英雄中选 1 个禁用
@@ -289,9 +251,10 @@ class DraftDataset(Dataset):
                 'hero_seq': hero_seq.copy(),
                 'side_seq': side_seq.copy(),
                 'target': self.hero_to_idx[my_finalban],
-                'phase': 6,  # Finalban 阶段
+                'phase': 6,
                 'win': 0 if is_win else 1,
-                'side': 2
+                'side': 2,
+                'weight': FINALBAN_WEIGHT
             })
 
     def __len__(self):
@@ -305,7 +268,8 @@ class DraftDataset(Dataset):
             'target': torch.tensor(sample['target'], dtype=torch.long),
             'phase': torch.tensor(sample['phase'], dtype=torch.long),
             'win': torch.tensor(sample['win'], dtype=torch.float),
-            'side': torch.tensor(sample['side'], dtype=torch.long)
+            'side': torch.tensor(sample['side'], dtype=torch.long),
+            'weight': torch.tensor(sample['weight'], dtype=torch.float)
         }
 
 
@@ -319,6 +283,7 @@ def collate_fn(batch):
     wins = torch.zeros(len(batch), dtype=torch.float)
     sides = torch.zeros(len(batch), dtype=torch.long)
     masks = torch.zeros(len(batch), max_len, dtype=torch.float)
+    weights = torch.zeros(len(batch), dtype=torch.float)
 
     for i, item in enumerate(batch):
         seq_len = len(item['hero_seq'])
@@ -329,6 +294,7 @@ def collate_fn(batch):
         wins[i] = item['win']
         sides[i] = item['side']
         masks[i, :seq_len] = 1
+        weights[i] = item['weight']
 
     return {
         'hero_seqs': hero_seqs,
@@ -337,7 +303,8 @@ def collate_fn(batch):
         'phases': phases,
         'wins': wins,
         'sides': sides,
-        'masks': masks
+        'masks': masks,
+        'weights': weights
     }
 
 
@@ -361,11 +328,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, device, epoc
         phases = batch['phases'].to(device)
         masks = batch['masks'].to(device)
 
-        logits, win_pred = model(hero_seqs, side_seqs, phases, src_mask=masks)
+        logits, _ = model(hero_seqs, side_seqs, phases, src_mask=masks)
 
-        loss = criterion(logits, targets)
-        win_loss = nn.BCELoss()(win_pred.squeeze(1), batch['wins'].to(device))
-        total_loss_batch = loss + 0.1 * win_loss
+        losses = criterion(logits, targets)  # [batch]，reduction='none'
+        total_loss_batch = (losses * batch['weights'].to(device)).mean()
 
         total_loss_batch = total_loss_batch / accum_steps
         total_loss_batch.backward()
@@ -412,11 +378,9 @@ def evaluate(model, dataloader, criterion, device):
             phases = batch['phases'].to(device)
             masks = batch['masks'].to(device)
 
-            logits, win_pred = model(hero_seqs, side_seqs, phases, src_mask=masks)
+            logits, _ = model(hero_seqs, side_seqs, phases, src_mask=masks)
 
-            loss = criterion(logits, targets)
-            win_loss = nn.BCELoss()(win_pred.squeeze(1), batch['wins'].to(device))
-            total_loss_batch = loss + 0.1 * win_loss
+            total_loss_batch = criterion(logits, targets).mean()
 
             total_loss += total_loss_batch.item()
 
@@ -438,11 +402,6 @@ if __name__ == '__main__':
     if not os.path.exists(DATA_FILE):
         print(f"\n❌ 找不到数据文件 {DATA_FILE}")
         sys.exit(1)
-
-    # 加载英雄信息
-    print("\n加载英雄属性信息...")
-    hero_info = load_hero_info()
-    print(f"✅ 加载 {len(hero_info)} 个英雄属性")
 
     # 加载数据
     if os.path.exists(CACHE_FILE):
@@ -517,10 +476,10 @@ if __name__ == '__main__':
     print(f"验证集：{len(val_battles):,} 场")
 
     print("\n创建训练数据集...")
-    train_dataset = DraftDataset(train_battles, hero_to_idx, hero_info)
+    train_dataset = DraftDataset(train_battles, hero_to_idx)
 
     print("创建验证数据集...")
-    val_dataset = DraftDataset(val_battles, hero_to_idx, hero_info)
+    val_dataset = DraftDataset(val_battles, hero_to_idx)
 
     train_loader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True,
@@ -557,8 +516,7 @@ if __name__ == '__main__':
         cycle_momentum=False
     )
 
-    # ⭐ 使用 Label Smoothing
-    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING)
+    criterion = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTHING, reduction='none')
     early_stopping = EarlyStopping(patience=EARLY_STOP_PATIENCE)
 
     print("\n" + "="*70)
@@ -568,12 +526,12 @@ if __name__ == '__main__':
     print(f"  BATCH_SIZE={BATCH_SIZE}, EPOCHS={EPOCHS}, LEARNING_RATE={LEARNING_RATE}")
     print(f"  D_MODEL={D_MODEL}, NHEAD={NHEAD}, NUM_LAYERS={NUM_LAYERS}")
     print(f"  DROPOUT={DROPOUT}, WEIGHT_DECAY={WEIGHT_DECAY}, GRADIENT_CLIP={GRADIENT_CLIP}")
-    print(f"  LABEL_SMOOTHING={LABEL_SMOOTHING}")
+    print(f"  LABEL_SMOOTHING={LABEL_SMOOTHING}, FINALBAN_WEIGHT={FINALBAN_WEIGHT}")
     print(f"  DIM_FEEDFORWARD={D_MODEL * 4}")
     print(f"  早停：{EARLY_STOP_PATIENCE} 轮无提升则停止")
     print("="*70)
 
-    best_val_acc = 0
+    best_val_loss = float('inf')
     start_time = datetime.now()
 
     for epoch in range(1, EPOCHS + 1):
@@ -590,8 +548,8 @@ if __name__ == '__main__':
         print(f"  训练损失：{train_loss:.4f}  Top1：{train_acc:.4f}  Top3：{train_top3:.4f}  Top5：{train_top5:.4f}")
         print(f"  验证损失：{val_loss:.4f}  Top1：{val_acc:.4f}  Top3：{val_top3:.4f}  Top5：{val_top5:.4f}")
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'hero_to_idx': hero_to_idx,
@@ -602,23 +560,23 @@ if __name__ == '__main__':
                     'num_layers': NUM_LAYERS,
                     'dropout': DROPOUT,
                     'num_heroes': len(hero_list),
-                    'dim_feedforward': D_MODEL * 4  # 保存 FFN 维度
+                    'dim_feedforward': D_MODEL * 4
                 },
                 'val_acc': val_acc,
                 'epoch': epoch,
                 'train_loss': train_loss,
                 'val_loss': val_loss
             }, OUTPUT_MODEL)
-            print(f"✅ 保存最佳模型 (验证准确率：{val_acc:.4f})")
+            print(f"✅ 保存最佳模型 (验证损失：{val_loss:.4f}  Top1：{val_acc:.4f})")
 
         early_stopping(val_loss, val_acc)
         if early_stopping.early_stop:
-            print(f"\n训练提前结束，最佳验证准确率：{best_val_acc:.4f}")
+            print(f"\n训练提前结束，最佳验证损失：{best_val_loss:.4f}")
             break
 
     elapsed = datetime.now() - start_time
     print("\n" + "="*70)
     print(f"训练完成！耗时：{elapsed}")
-    print(f"最佳验证准确率：{best_val_acc:.4f}")
+    print(f"最佳验证损失：{best_val_loss:.4f}")
     print(f"模型已保存：{OUTPUT_MODEL}")
     print("="*70)
