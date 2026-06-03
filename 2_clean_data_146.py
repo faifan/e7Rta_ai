@@ -6,8 +6,11 @@
 """
 import json
 import os
+from datetime import datetime, timedelta
 
 MIN_APPEAR = 50
+KEEP_DAYS = 15  # 只保留最近 N 天的战斗数据
+CUTOFF_DATE = datetime.now() - timedelta(days=KEEP_DAYS)
 
 # 加载 146 个英雄
 with open('e7.json', 'r', encoding='utf-8') as f:
@@ -37,6 +40,8 @@ invalid_reasons = {
     'enemy_preban_invalid': 0,
     'my_preban_count': 0,
     'enemy_preban_count': 0,
+    'too_old': 0,
+    'no_opening_rule': 0,
 }
 
 pass1_battles = []
@@ -75,9 +80,22 @@ for server in data.get('servers', []):
             if any(c not in valid_heroes for c in enemy_preban):
                 invalid_reasons['enemy_preban_invalid'] += 1; continue
 
+            battle_day_str = battle.get('battle_day', '')
+            try:
+                battle_date = datetime.strptime(battle_day_str[:19], '%Y-%m-%d %H:%M:%S')
+                if battle_date < CUTOFF_DATE:
+                    invalid_reasons['too_old'] += 1; continue
+            except (ValueError, TypeError):
+                invalid_reasons['too_old'] += 1; continue
+
+            opening_rule = battle.get('opening_rule_title', '_')
+            if opening_rule == '_':
+                invalid_reasons['no_opening_rule'] += 1; continue
+
             pass1_battles.append({
                 'battle_seq': battle.get('battle_seq'),
                 'iswin': battle.get('iswin', 0),
+                'opening_rule_title': opening_rule,
                 'my_deck': {
                     'preban_list': my_preban,
                     'hero_list': [

@@ -37,6 +37,14 @@ WEIGHT_DECAY = 0.01
 GRADIENT_CLIP = 1.0
 LABEL_SMOOTHING = 0.1
 FINALBAN_WEIGHT = 3.0  # finalban 样本较少但重要，上采样权重
+
+OPENING_RULE_MAP = {
+    '_':                          0,  # 未知（preban阶段）
+    'rta_openingrule_category_1': 1,
+    'rta_openingrule_category_2': 2,
+    'rta_openingrule_category_4': 3,
+    'rta_openingrule_category_5': 4,
+}
 WIN_LOSS_WEIGHT = 0.0  # 胜率预测辅助 loss 权重（已关闭，单局胜负噪声大）
 WIN_PICK_WEIGHT  = 1.5  # 赢局 pick/ban 样本权重（赢家的选择更值得学）
 LOSS_PICK_WEIGHT = 0.7  # 输局 pick/ban 样本权重
@@ -138,15 +146,17 @@ class DraftDataset(Dataset):
         my_finalban = next((h['code'] for h in my_heroes_data if h.get('ban') == 1), None)
         enemy_finalban = next((h['code'] for h in enemy_heroes_data if h.get('ban') == 1), None)
 
+        opening_rule_id = OPENING_RULE_MAP.get(battle.get('opening_rule_title', '_'), 0)
+
         # 原始视角
         self._generate_samples(my_heroes, enemy_heroes, my_preban, enemy_preban,
-                               is_win, my_first_pick, my_finalban, enemy_finalban)
+                               is_win, my_first_pick, my_finalban, enemy_finalban, opening_rule_id)
         # 互换视角数据增强（双倍数据）
         self._generate_samples(enemy_heroes, my_heroes, enemy_preban, my_preban,
-                               not is_win, not my_first_pick, enemy_finalban, my_finalban)
+                               not is_win, not my_first_pick, enemy_finalban, my_finalban, opening_rule_id)
 
     def _generate_samples(self, my_heroes, enemy_heroes, my_preban, enemy_preban,
-                          is_win, my_first_pick, my_finalban, enemy_finalban):
+                          is_win, my_first_pick, my_finalban, enemy_finalban, opening_rule_id=0):
         hero_seq = []
         side_seq = []
         phase_seq = []
@@ -168,6 +178,7 @@ class DraftDataset(Dataset):
                     'win': 1 if is_win else 0,
                     'side': 1,
                     'first_pick': my_fp,
+                    'opening_rule': 0,  # preban阶段场地未知
                     'weight': WIN_PICK_WEIGHT if is_win else LOSS_PICK_WEIGHT
                 })
             my_ban_seq.append(self.hero_to_idx[my_preban[i]])
@@ -188,6 +199,7 @@ class DraftDataset(Dataset):
                     'win': 0 if is_win else 1,
                     'side': 2,
                     'first_pick': enemy_fp,
+                    'opening_rule': 0,  # preban阶段场地未知
                     'weight': WIN_PICK_WEIGHT if not is_win else LOSS_PICK_WEIGHT
                 })
             enemy_ban_seq.append(self.hero_to_idx[enemy_preban[i]])
@@ -210,9 +222,9 @@ class DraftDataset(Dataset):
                 ('my', 2), ('enemy', 2), ('my', 1),
             ]
 
-        my_idx = enemy_idx = current_phase = 0
+        my_idx = enemy_idx = 0
 
-        for side, count in picks_order:
+        for round_idx, (side, count) in enumerate(picks_order):
             for _ in range(count):
                 if side == 'my' and my_idx < len(my_heroes):
                     if len(hero_seq) > 0:
@@ -221,15 +233,16 @@ class DraftDataset(Dataset):
                             'side_seq': side_seq.copy(),
                             'phase_seq': phase_seq.copy(),
                             'target': self.hero_to_idx[my_heroes[my_idx]],
-                            'phase': current_phase,
+                            'phase': min(round_idx + 1, 5),
                             'win': 1 if is_win else 0,
                             'side': 1,
                             'first_pick': my_fp,
+                            'opening_rule': opening_rule_id,
                             'weight': WIN_PICK_WEIGHT if is_win else LOSS_PICK_WEIGHT
                         })
                     hero_seq.append(self.hero_to_idx[my_heroes[my_idx]])
                     side_seq.append(1)
-                    phase_seq.append(current_phase + 1)
+                    phase_seq.append(round_idx + 1)
                     my_idx += 1
 
                 elif side == 'enemy' and enemy_idx < len(enemy_heroes):
@@ -239,19 +252,17 @@ class DraftDataset(Dataset):
                             'side_seq': side_seq.copy(),
                             'phase_seq': phase_seq.copy(),
                             'target': self.hero_to_idx[enemy_heroes[enemy_idx]],
-                            'phase': current_phase,
+                            'phase': min(round_idx + 1, 5),
                             'win': 0 if is_win else 1,
                             'side': 2,
                             'first_pick': enemy_fp,
+                            'opening_rule': opening_rule_id,
                             'weight': WIN_PICK_WEIGHT if not is_win else LOSS_PICK_WEIGHT
                         })
                     hero_seq.append(self.hero_to_idx[enemy_heroes[enemy_idx]])
                     side_seq.append(2)
-                    phase_seq.append(current_phase + 1)
+                    phase_seq.append(round_idx + 1)
                     enemy_idx += 1
-
-            if current_phase < 5:
-                current_phase += 1
 
         # Finalban 阶段
         # 规则：双方各自第3个选的英雄（index=2）不可被ban
@@ -268,6 +279,7 @@ class DraftDataset(Dataset):
                 'win': 1 if is_win else 0,
                 'side': 1,
                 'first_pick': my_fp,
+                'opening_rule': opening_rule_id,
                 'weight': FINALBAN_WEIGHT,
                 'avail_indices': enemy_pick_indices
             })
@@ -285,6 +297,7 @@ class DraftDataset(Dataset):
                 'win': 0 if is_win else 1,
                 'side': 2,
                 'first_pick': enemy_fp,
+                'opening_rule': opening_rule_id,
                 'weight': FINALBAN_WEIGHT,
                 'avail_indices': my_pick_indices
             })
@@ -309,6 +322,7 @@ class DraftDataset(Dataset):
             'win': torch.tensor(sample['win'], dtype=torch.float),
             'side': torch.tensor(sample['side'], dtype=torch.long),
             'first_pick': torch.tensor(sample.get('first_pick', 1), dtype=torch.long),
+            'opening_rule': torch.tensor(sample.get('opening_rule', 0), dtype=torch.long),
             'weight': torch.tensor(sample['weight'], dtype=torch.float),
             'avail_mask': avail_mask
         }
@@ -325,6 +339,7 @@ def collate_fn(batch):
     wins = torch.zeros(len(batch), dtype=torch.float)
     sides = torch.zeros(len(batch), dtype=torch.long)
     first_picks = torch.zeros(len(batch), dtype=torch.long)
+    opening_rules = torch.zeros(len(batch), dtype=torch.long)
     masks = torch.zeros(len(batch), max_len, dtype=torch.float)
     weights = torch.zeros(len(batch), dtype=torch.float)
     avail_masks = torch.stack([item['avail_mask'] for item in batch])
@@ -339,6 +354,7 @@ def collate_fn(batch):
         wins[i] = item['win']
         sides[i] = item['side']
         first_picks[i] = item['first_pick']
+        opening_rules[i] = item['opening_rule']
         masks[i, :seq_len] = 1
         weights[i] = item['weight']
 
@@ -351,6 +367,7 @@ def collate_fn(batch):
         'wins': wins,
         'sides': sides,
         'first_picks': first_picks,
+        'opening_rules': opening_rules,
         'masks': masks,
         'weights': weights,
         'avail_masks': avail_masks
@@ -381,8 +398,9 @@ def train_epoch(model, dataloader, optimizer, scheduler, criterion, criterion_no
         wins = batch['wins'].to(device)
         sides = batch['sides'].to(device)
         first_picks = batch['first_picks'].to(device)
+        opening_rules = batch['opening_rules'].to(device)
 
-        logits, win_rate = model(hero_seqs, side_seqs, phases, src_mask=masks, token_phase_ids=phase_seqs, prediction_side_ids=sides, first_pick_ids=first_picks)
+        logits, win_rate = model(hero_seqs, side_seqs, phases, src_mask=masks, token_phase_ids=phase_seqs, prediction_side_ids=sides, first_pick_ids=first_picks, opening_rule_ids=opening_rules)
         logits_masked = logits.masked_fill(avail_masks == 0, float('-inf'))
 
         is_finalban = (phases == 6)
@@ -446,8 +464,9 @@ def evaluate(model, dataloader, criterion, criterion_no_smooth, win_criterion, d
             wins = batch['wins'].to(device)
             sides = batch['sides'].to(device)
             first_picks = batch['first_picks'].to(device)
+            opening_rules = batch['opening_rules'].to(device)
 
-            logits, win_rate = model(hero_seqs, side_seqs, phases, src_mask=masks, token_phase_ids=phase_seqs, prediction_side_ids=sides, first_pick_ids=first_picks)
+            logits, win_rate = model(hero_seqs, side_seqs, phases, src_mask=masks, token_phase_ids=phase_seqs, prediction_side_ids=sides, first_pick_ids=first_picks, opening_rule_ids=opening_rules)
             logits_masked = logits.masked_fill(avail_masks == 0, float('-inf'))
 
             is_finalban = (phases == 6)

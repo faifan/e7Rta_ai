@@ -68,6 +68,9 @@ class DraftTransformer(nn.Module):
 
         # 当前预测方是先手还是后手 (0=padding, 1=先手方, 2=后手方)
         self.first_pick_embedding = nn.Embedding(3, d_model)
+
+        # 开局规则 (0=未知/preban阶段, 1=category_1, 2=category_2, 3=category_4, 4=category_5)
+        self.opening_rule_embedding = nn.Embedding(5, d_model)
         
         # Transformer Encoder
         encoder_layer = nn.TransformerEncoderLayer(
@@ -99,7 +102,7 @@ class DraftTransformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
     
-    def forward(self, hero_ids, side_ids, phase_ids, src_mask=None, token_phase_ids=None, prediction_side_ids=None, first_pick_ids=None):
+    def forward(self, hero_ids, side_ids, phase_ids, src_mask=None, token_phase_ids=None, prediction_side_ids=None, first_pick_ids=None, opening_rule_ids=None):
         """
         前向传播
 
@@ -130,6 +133,10 @@ class DraftTransformer(nn.Module):
             x = x + self.token_phase_embedding(token_phase_ids)
         if first_pick_ids is not None:
             x = x + self.first_pick_embedding(first_pick_ids).unsqueeze(1).expand(-1, seq_len, -1)
+        if opening_rule_ids is not None:
+            x = x + self.opening_rule_embedding(opening_rule_ids).unsqueeze(1).expand(-1, seq_len, -1)
+        if prediction_side_ids is not None:
+            x = x + self.prediction_side_embedding(prediction_side_ids).unsqueeze(1).expand(-1, seq_len, -1)
 
         # 添加位置编码
         pos_enc = self.pos_encoder.pe[:seq_len, :, :].transpose(0, 1)  # [1, seq, d_model]
@@ -151,17 +158,12 @@ class DraftTransformer(nn.Module):
         else:
             pooled = memory.mean(dim=1)
 
-        # 叠加预测方 embedding（明确告诉模型"现在是在替哪方选人"）
-        if prediction_side_ids is not None:
-            pred_side_emb = self.prediction_side_embedding(prediction_side_ids)  # [batch, d_model]
-            pooled = pooled + pred_side_emb
-
         next_pick_logits = self.hero_classifier(pooled)  # [batch, num_heroes]
         win_rate = self.win_rate_head(pooled)  # [batch, 1]
 
         return next_pick_logits, win_rate
 
-    def predict_next_pick(self, hero_sequence, side_sequence, phase_id, available_mask, top_k=10, token_phase_sequence=None, prediction_side_id=1, is_first_pick=True):
+    def predict_next_pick(self, hero_sequence, side_sequence, phase_id, available_mask, top_k=10, token_phase_sequence=None, prediction_side_id=1, is_first_pick=True, opening_rule_id=0):
         self.eval()
         device = next(self.parameters()).device
 
@@ -180,9 +182,10 @@ class DraftTransformer(nn.Module):
         phase_ids = torch.tensor([phase_id], dtype=torch.long, device=device)
         pred_side_ids = torch.tensor([prediction_side_id], dtype=torch.long, device=device)
         first_pick_ids = torch.tensor([1 if is_first_pick else 2], dtype=torch.long, device=device)
+        opening_rule_ids = torch.tensor([opening_rule_id], dtype=torch.long, device=device)
 
         with torch.no_grad():
-            logits, win_rate = self.forward(hero_ids, side_ids, phase_ids, src_mask=src_mask, token_phase_ids=token_phase_ids, prediction_side_ids=pred_side_ids, first_pick_ids=first_pick_ids)
+            logits, win_rate = self.forward(hero_ids, side_ids, phase_ids, src_mask=src_mask, token_phase_ids=token_phase_ids, prediction_side_ids=pred_side_ids, first_pick_ids=first_pick_ids, opening_rule_ids=opening_rule_ids)
 
             if available_mask is not None:
                 available_mask = available_mask.to(device)

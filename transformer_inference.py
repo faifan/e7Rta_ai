@@ -154,7 +154,7 @@ class DraftRecommender:
 
         # 5. 预测
         recommendations = self.model.predict_next_pick(
-            hero_seq, side_seq, phase_id, available_mask, top_k
+            hero_seq, side_seq, phase_id, available_mask, top_k, opening_rule_id=0
         )
 
         # 6. 转换结果
@@ -329,7 +329,7 @@ class DraftRecommender:
                 available_mask[self.hero_to_idx[hero]] = 1.0
 
         # 3. 预测（phase=6 表示 Finalban）
-        recs = self.model.predict_next_pick(hero_seq, side_seq, 6, available_mask, top_k)
+        recs = self.model.predict_next_pick(hero_seq, side_seq, 6, available_mask, top_k, opening_rule_id=0)
         return [{'hero_code': self.idx_to_hero.get(r['hero_idx'], 'unknown'),
                  'probability': r['probability']} for r in recs]
 
