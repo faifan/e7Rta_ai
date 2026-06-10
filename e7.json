@@ -1715,6 +1715,13 @@
     "attribute_cd": "dark"
   },
   {
+    "code": "c2185",
+    "grade": "5",
+    "name": "里安娜路西艾拉",
+    "job_cd": "assassin",
+    "attribute_cd": "dark"
+  },
+  {
     "code": "c3001",
     "grade": "3",
     "name": "屠杀部队员",
@@ -2503,6 +2510,13 @@
     "grade": "5",
     "name": "童话泰妮布里雅",
     "job_cd": "mage",
+    "attribute_cd": "ice"
+  },
+  {
+    "code": "c5069",
+    "grade": "5",
+    "name": "黎明序曲鲁特比",
+    "job_cd": "ranger",
     "attribute_cd": "ice"
   },
   {

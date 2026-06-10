@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 # 配置
-HERO_LIST_FILE = 'hero_list.json'
+HERO_LIST_FILE = 'output/hero_list_clean.json'
 HERO_IMAGES_DIR = 'hero_images'
 HERO_IMAGES_MAPPING = 'hero_images_mapping.json'
 
@@ -45,7 +45,15 @@ def main():
     
     with open(HERO_LIST_FILE, 'r', encoding='utf-8') as f:
         data = json.load(f)
-        hero_list = data['hero_list']
+        # hero_list_clean.json 是 code 数组 ["c1001", ...]
+        # e7.json 是 [{code, name, ...}, ...]
+        # hero_list.json 是 {hero_list: [...]}
+        if isinstance(data, list) and data and isinstance(data[0], str):
+            hero_list = data
+        elif isinstance(data, list):
+            hero_list = [h['code'] for h in data]
+        else:
+            hero_list = data['hero_list']
     
     print(f"英雄总数：{len(hero_list)}")
     
